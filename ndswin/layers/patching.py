@@ -188,10 +188,10 @@ class PatchEmbed(nn.Module):
 
 
 class PatchMerging(nn.Module):
-    """Smart swin-like patch merging layer for n- dimensional grid data.
+    """Swin-like patch merging layer for n- dimensional grid data.
 
     Concatenates odd/even patches across all dimensions and projects them down, reducing
-    the grid size by 1/2. It is ONLY applied to axes that have >2 elements.
+    the grid size by 1/2.
 
     Args:
         space (int): Number of input/output dimensions.
@@ -199,6 +199,7 @@ class PatchMerging(nn.Module):
         in_resolution (tuple(int)): Input grid size.
         norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
         c_multiplier (int): Latent dimensions expansions after merging. Default is 2.
+        mask_spaces (tuple(bool)): Whether nth axis is merged. Sequence of length space.
     """
 
     def __init__(
@@ -208,21 +209,22 @@ class PatchMerging(nn.Module):
         in_resolution: Sequence[int],
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
+        mask_spaces: Optional[Sequence[bool]] = None,
         init_weights: Optional[str] = None,
     ) -> None:
         super().__init__()
-        self.space = space
         self.dim = dim
+        self.mask_spaces = mask_spaces if mask_spaces else (True,) * space
 
-        # NOTE only merge those with more than two patches -> otherwise risk of nans
-        self.merge_subspace = [g > 2 for g in in_resolution]
+        assert len(self.mask_spaces) == space
+        n_merges = sum(self.mask_spaces)
+
         self.in_resolution = in_resolution
         # grid resolution after patch merging
         self.grid_size = [
-            ceil(g / 2) if m else g for g, m in zip(in_resolution, self.merge_subspace)
+            ceil(g / 2) if m else g for g, m in zip(in_resolution, self.mask_spaces)
         ]
 
-        n_merges = sum(self.merge_subspace)
         self.norm = norm_layer(2**n_merges * dim) if norm_layer else nn.Identity()
         self.out_dim = c_multiplier * dim
         self.reduction = nn.Linear(2**n_merges * dim, self.out_dim, bias=False)
@@ -242,25 +244,85 @@ class PatchMerging(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # must pad to even shape
-        # TODO for now pad to multiple of 2. can do better?
-        x, _ = pad_to_blocks(x, self.space * (2,))
+        padding = [2 if m else 1 for m in self.mask_spaces]
+        x, _ = pad_to_blocks(x, padding)
 
-        # even/odd shifted patch selection along all axes (only for accepted subspaces)
-        subspaces01 = []
-        for sub in product(*[[0, 1] if sub else [0] for sub in self.merge_subspace]):
+        subspaces = []
+        for sub in product(*[[0, 1] if sub else [0] for sub in self.mask_spaces]):
             merge_axis = []
             for i, s in enumerate(sub):
-                if self.merge_subspace[i]:
+                if self.mask_spaces[i]:
                     # alternated slice
                     merge_axis.append(slice(s, None, 2))
                 else:
-                    # cannot split this patch
+                    # masked axis
                     merge_axis.append(slice(0, None))
-            subspaces01.append(merge_axis)
+            subspaces.append(merge_axis)
 
-        x = torch.cat([x[:, *merge_ax, :] for merge_ax in subspaces01], -1)
+        x = torch.cat([x[:, *merge_ax, :] for merge_ax in subspaces], -1)
 
         x = self.norm(x)
         x = self.reduction(x)
 
+        return x
+
+
+class PatchMerging(nn.Module):
+    """Swin-like patch merging layer for n- dimensional grid data.
+
+    Concatenates odd/even patches across all dimensions and projects them down, reducing
+    the grid size by 1/2.
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): Latent dimension.
+        in_resolution (tuple(int)): Input grid size.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        c_multiplier (int): Latent dimensions expansions after merging. Default is 2.
+        mask_spaces (tuple(bool)): Whether nth axis is merged. Sequence of length space.
+    """
+
+    def __init__(
+        self,
+        space: int,
+        dim: int,
+        in_resolution: Sequence[int],
+        norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
+        c_multiplier: int = 2,
+        init_weights: Optional[str] = None,
+    ) -> None:
+
+        super().__init__()
+        self.space = space
+        self.dim = dim
+
+        self.grid_size = [ceil(g / 2) for g in in_resolution]
+
+        self.norm = norm_layer(2**space * dim) if norm_layer else nn.Identity()
+        self.out_dim = c_multiplier * dim
+        self.reduction = nn.Linear(2**space * dim, self.out_dim, bias=False)
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.reduction.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.reduction.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # pad to even shape
+        x, _ = pad_to_blocks(x, self.space * (2,))
+        subspaces = []
+        for idxs in product(*[range(2) for _ in range(self.space)]):
+            subspaces.append(slice(i, None, 2) for i in idxs)
+        # merge and reduce
+        x = torch.cat([x[:, *sub, :] for sub in subspaces], -1)
+        x = self.norm(x)
+        x = self.reduction(x)
         return x
