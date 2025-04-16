@@ -7,3 +7,5 @@
 .vscode/
 *.out
 datasets/
+cifar/
+hmdb51/

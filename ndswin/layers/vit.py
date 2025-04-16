@@ -157,26 +157,27 @@ class VisionTransformerBlock(nn.Module):
 
         self.attn.reset_parameters(init_weights)
 
-    def forward_part1(self, x):
+    def forward_attn(self, x):
         x = self.attn(x)
         x = self.norm1(x)
+        x = self.drop_path(x)
         return x
 
-    def forward_part2(self, x):
-        x = self.drop_path(self.norm2(self.mlp(x)))
+    def forward_mlp(self, x):
+        x = self.mlp(x)
+        x = self.norm2(x)
+        x = self.drop_path(x)
         return x
 
     def forward(self, x):
-        shortcut = x
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(self.forward_part1, x, use_reentrant=False)
+            x = x + checkpoint.checkpoint(self.forward_attn, x, use_reentrant=False)
         else:
-            x = self.forward_part1(x)
-        x = shortcut + self.drop_path(x)
+            x = x + self.forward_attn(x)
         if self.use_checkpoint:
-            x = x + checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
+            x = x + checkpoint.checkpoint(self.forward_mlp, x, use_reentrant=False)
         else:
-            x = x + self.forward_part2(x)
+            x = x + self.forward_mlp(x)
         return x
 
 

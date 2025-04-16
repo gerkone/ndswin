@@ -181,7 +181,7 @@ class WindowAttention(nn.Module):
         self.qkv_bias = qkv_bias
         space = len(window_size)
 
-        # relative position bias (RPB) to learn token distances
+        # relative position bias (RPB) to learn token distances (swinv2)
         self.cpb_mlp = MLP(
             [space, 512, num_heads],
             act_fn=partial(nn.ReLU, inplace=True),
@@ -199,15 +199,13 @@ class WindowAttention(nn.Module):
         # normalize to -8, 8
         rpb = 8 * rpb
         rpb = torch.sign(rpb) * torch.log2(torch.abs(rpb) + 1.0) / np.log2(8)
-        self.register_buffer("rpb", rpb)  # NOTE: fsdp does not shard buffer
+        self.register_buffer("rpb", rpb)
 
         # index with distances
         grid = torch.stack(
             torch.meshgrid(*[torch.arange(w) for w in window_size], indexing="ij")
-        )  # (space, wD, wH, wW, wU, wV)
+        )  # (space, wH, wW, ...)
         dists = grid.flatten(1).unsqueeze(-1) - grid.flatten(1).unsqueeze(1)
-
-        # TODO why?
         for i in range(space):
             center = max(np.prod([(2 * w - 1) for w in window_size[(i + 1) :]]), 1)
             dists[i] = (dists[i] + window_size[i] - 1) * center
@@ -372,7 +370,7 @@ class SwinTransformerBlock(nn.Module):
 
         self.attn.reset_parameters(init_weights)
 
-    def forward_part1(self, x, mask_matrix):
+    def forward_attn(self, x, mask):
         grid_size = x.shape[1:-1]
 
         x, pad_axes = pad_to_blocks(x, self.window_size)
@@ -383,7 +381,7 @@ class SwinTransformerBlock(nn.Module):
                 shifts=[-s for s in self.shift_size],
                 dims=list(range(1, self.space + 1)),
             )
-            attn_mask = mask_matrix
+            attn_mask = mask
         else:
             shifted_x = x
             attn_mask = None
@@ -393,6 +391,7 @@ class SwinTransformerBlock(nn.Module):
         # reshape to window/grid
         attn_windows = attn_windows.view(-1, *(self.window_size + (x.shape[-1],)))
         shifted_x = window_reverse(attn_windows, self.window_size, x.shape[:-1])
+
         if any(i > 0 for i in self.shift_size):
             x = torch.roll(
                 shifted_x,
@@ -403,27 +402,28 @@ class SwinTransformerBlock(nn.Module):
             x = shifted_x
 
         x = unpad(x, pad_axes, grid_size)
-
         x = self.norm1(x)
+        x = self.drop_path(x)
         return x
 
-    def forward_part2(self, x):
-        x = self.drop_path(self.norm2(self.mlp(x)))
+    def forward_mlp(self, x):
+        x = self.mlp(x)
+        x = self.norm2(x)
+        x = self.drop_path(x)
         return x
 
-    def forward(self, x, mask_matrix):
-        shortcut = x
+    def forward(self, x, mask):
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(
-                self.forward_part1, x, mask_matrix, use_reentrant=False
+            x = x + checkpoint.checkpoint(
+                self.forward_attn, x, mask, use_reentrant=False
             )
         else:
-            x = self.forward_part1(x, mask_matrix)
-        x = shortcut + self.drop_path(x)
+            x = x + self.forward_attn(x, mask)
+
         if self.use_checkpoint:
-            x = x + checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
+            x = x + checkpoint.checkpoint(self.forward_mlp, x, use_reentrant=False)
         else:
-            x = x + self.forward_part2(x)
+            x = x + self.forward_mlp(x)
         return x
 
 
