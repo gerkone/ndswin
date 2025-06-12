@@ -3,11 +3,11 @@
 
 
 ## Content
-- [`classifier.py`](/ndswin/classifier.py) Simple swin classifier.
-- [`layers/swin_layers.py`](/ndswin/layers/swin_layers.py) N-dimensional Shifted Window Transformer layer.
-- [`layers/patching.py`](/ndswin/layers/patching.py) Nd patch embed and patch merging.
-- [`layers/positional.py`](/ndswin/layers/positional.py) Positional encodings.
-- [`layers/vit_layers.py`](/ndswin/layers/vit_layers.py) Nd ViT layer.
+- [`classifier.py`](ndswin/swin_classifier.py) Simple swin classifier.
+- [`layers/swin.py`](ndswin/layers/swin.py) N-dimensional Shifted Window Transformer layer.
+- [`layers/patching.py`](ndswin/layers/patching.py) Nd patch embed and patch merging.
+- [`layers/positional.py`](ndswin/layers/positional.py) Positional encodings.
+- [`layers/vit.py`](ndswin/layers/vit.py) Nd ViT layer.
 
 
 ## Usage
